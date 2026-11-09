@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+langchain
+langchain-core
+langchain-community
+langchain-ollama
+langchain-huggingface
+langchain-chroma
+chromadb
+sentence-transformers
+pypdf
+pytest
+pytest-mock
+httpx
+
+python-multipart
+pymupdf
