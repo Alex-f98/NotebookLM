@@ -6,12 +6,15 @@ langchain-community
 langchain-ollama
 langchain-huggingface
 langchain-chroma
+langchain-text-splitters
 chromadb
 sentence-transformers
 pypdf
+pymupdf
+networkx
+streamlit>=1.65
 pytest
 pytest-mock
 httpx
 
 python-multipart
-pymupdf

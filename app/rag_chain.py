@@ -32,20 +32,49 @@ class RAGService():
                 num_ctx     = 4096,     # tamaño del contexto
             )   
 
-    def generate_answer(self, query: str) -> dict:
-        docs = self.vector_store.search_similar(query, k=3)
+    def prepare(self, query: str, k: int = 3,
+                sources: list[str] | None = None) -> tuple[list, str]:
+        """
+        Recupera el contexto y arma el prompt final.
+
+        Devuelve `(docs_recuperados, prompt)`.
+        """
+        docs = self.vector_store.search_similar(query, k=k, sources=sources)
 
         context = "\n\n".join(doc.page_content for doc in docs)
         prompt = PROMPT_TEMPLATE.format(context=context, query=query)
+        return docs, prompt
 
+    def generate_answer(self, query: str, k: int = 3,
+                        sources: list[str] | None = None) -> dict:
+        docs, prompt = self.prepare(query, k=k, sources=sources)
         answer = self.model.invoke(prompt)
 
-        sources = [
-            {"content": doc.page_content, "source": doc.metadata.get("source", "")}
+        return {
+            "query": query,
+            "answer": answer,
+            "sources": self._format_sources(docs),
+        }
+
+    def stream_answer(self, query: str, k: int = 3,
+                      sources: list[str] | None = None):
+        """
+        Igual que `generate_answer` pero devuelve `(docs, generador_de_tokens)`
+        para poder mostrar la respuesta en streaming en la UI.
+        """
+        docs, prompt = self.prepare(query, k=k, sources=sources)
+        return docs, self.model.stream(prompt)
+
+    @staticmethod
+    def _format_sources(docs: list) -> list[dict]:
+        return [
+            {
+                "content": doc.page_content,
+                "source": doc.metadata.get("source", ""),
+                "page": doc.metadata.get("page"),
+            }
             for doc in docs
         ]
-
-        return {"query": query, "answer": answer, "sources": sources}
 
 
 
