@@ -3,3 +3,7 @@
 .pytest_cache
 __pycache__
 *.pdf
+data/db/
+data/uploads/
+data/knowledge_graph.graphml
+data/sources.json
