@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import html
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -24,6 +25,7 @@ for path in (str(FRONTEND_DIR), str(ROOT)):
         sys.path.insert(0, path)
 
 import rag_backend as backend  # noqa: E402
+from math_markdown import normalize_math  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -66,7 +68,7 @@ if "notebook_title" not in st.session_state:
 if "engine" not in st.session_state:
     st.session_state.engine = "Vectorial"
 if "k" not in st.session_state:
-    st.session_state.k = 3
+    st.session_state.k = 4
 
 BASE_URL = backend.DEFAULT_BASE_URL
 
@@ -157,6 +159,28 @@ def render_source_details(sources: list[dict]) -> None:
                 st.markdown('<div class="nb-ref-sep"></div>', unsafe_allow_html=True)
 
 
+def stream_markdown(tokens) -> str:
+    """Muestra tokens en streaming y renderiza LaTeX con KaTeX.
+
+    `st.write_stream` no normaliza los delimitadores, así que acumulamos el
+    texto y re-renderizamos con `normalize_math`. Se limita la frecuencia para
+    no reparsear Markdown con cada token.
+    """
+    placeholder = st.empty()
+    text = ""
+    last_render = 0.0
+
+    for chunk in tokens:
+        text += str(chunk)
+        now = time.monotonic()
+        if now - last_render >= 0.15:
+            placeholder.markdown(normalize_math(text))
+            last_render = now
+
+    placeholder.markdown(normalize_math(text))
+    return text
+
+
 def render_notes_panel() -> None:
     notes = st.session_state.notes
     if not notes:
@@ -166,7 +190,7 @@ def render_notes_panel() -> None:
     lines = ["# Notas — Notebook LM local", ""]
     for note in notes:
         with st.expander(note["question"][:90] or "Nota"):
-            st.markdown(note["answer"])
+            st.markdown(normalize_math(note["answer"]))
             st.caption(f"Guardada el {note['created']}")
         lines.append(f"## {note['question']}\n\n{note['answer']}\n")
 
@@ -366,7 +390,7 @@ with st.sidebar:
         st.slider(
             "Fragmentos recuperados (k)",
             min_value=1,
-            max_value=8,
+            max_value=10,
             key="k",
             help="Cuántos fragmentos de texto se envían al modelo.",
         )
@@ -542,7 +566,7 @@ with chat_col:
             refs = backend.dedupe_sources(message.get("sources", []))
             with st.container(key=f"msg_bot_{index}"):
                 with st.chat_message("assistant", avatar="📔"):
-                    st.markdown(message["content"])
+                    st.markdown(normalize_math(message["content"]))
 
                     if message.get("graph_facts"):
                         with st.expander(
@@ -588,6 +612,14 @@ with chat_col:
             model_name = st.session_state.model
             rag = backend.get_rag(model_name, BASE_URL)
 
+            # El último mensaje es la pregunta actual: no la repetimos en el
+            # historial que recibe el modelo.
+            history = [
+                {"role": item["role"], "content": item["content"]}
+                for item in st.session_state.messages[:-1]
+                if not item.get("error")
+            ][-6:]
+
             with st.container(key=f"msg_bot_{len(st.session_state.messages)}"):
                 with st.chat_message("assistant", avatar="📔"):
                     started = datetime.now()
@@ -599,16 +631,18 @@ with chat_col:
                                 question,
                                 k=st.session_state.k,
                                 sources=selected_sources or None,
+                                history=history,
                             )
                         else:
                             docs, tokens = rag.stream_answer(
                                 question,
                                 k=st.session_state.k,
                                 sources=selected_sources or None,
+                                history=history,
                             )
                             graph_facts = []
 
-                        answer = st.write_stream(tokens)
+                        answer = stream_markdown(tokens)
                         answer = answer if isinstance(answer, str) else "".join(map(str, answer))
                     except Exception as exc:  # noqa: BLE001
                         st.error(
@@ -682,21 +716,24 @@ with studio_col:
 
                 if generate:
                     docs = backend.get_vector_store().get_documents(
-                        sources=selected_sources, limit=50
+                        sources=selected_sources
                     )
-                    context = "\n\n".join(doc.page_content for doc in docs)[:9000]
+                    context = backend.summary_context(docs)
                     prompt = (
                         "Sos un asistente experto en síntesis de documentos. "
                         "A partir de las fuentes, escribí un resumen en español con:\n"
-                        "1) un párrafo breve de contexto,\n"
+                        "1) un párrafo breve de contexto (de qué trata),\n"
                         "2) 5 bullets con las ideas clave,\n"
                         "3) 3 preguntas sugeridas para seguir explorando.\n"
-                        "Usá sólo la información de las fuentes.\n\n"
+                        "Los fragmentos provienen de distintas partes del documento, "
+                        "así que integrá la información en vez de resumir cada uno.\n"
+                        "Usá sólo la información de las fuentes y citá la página cuando puedas.\n"
+                        "Si hay fórmulas, escribilas en LaTeX ($...$ o $$...$$).\n\n"
                         f"FUENTES:\n{context}\n\nRESUMEN:"
                     )
                     try:
                         with st.spinner("Sintetizando las fuentes…"):
-                            summary = st.write_stream(
+                            summary = stream_markdown(
                                 backend.get_rag(st.session_state.model, BASE_URL).model.stream(prompt)
                             )
                         st.session_state.summary = (
@@ -713,7 +750,7 @@ with studio_col:
                     and st.session_state.summary_key == summary_key
                 ):
                     with st.container(key="summary_card"):
-                        st.markdown(st.session_state.summary)
+                        st.markdown(normalize_math(st.session_state.summary))
 
         with tab_graph:
             graph_store = backend.get_graph_store()

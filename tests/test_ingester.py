@@ -1,6 +1,11 @@
 import pytest
 from langchain_core.documents import Document
-from app.ingester import load_document, split_documents
+from app.ingester import (
+    load_document,
+    split_documents,
+    is_informative_text,
+    filter_informative_chunks,
+)
 
 def test_load_txt_file_success(tmp_path):
     # Setup: Crear archivo temporal
@@ -28,5 +33,32 @@ def test_split_documents_length():
     assert len(chunks) > 1
     for chunk in chunks:
         assert len(chunk.page_content) <= 550 # Tolerancia por palabras completas
+
+
+def test_is_informative_text_rejects_plot_junk():
+    # Página de gráfico extraída como letras sueltas.
+    assert not is_informative_text("G G G G G G G G G G G G G G G G " * 30)
+
+
+def test_is_informative_text_keeps_prose():
+    texto = (
+        "El tanque cónico piramidal tiene una bomba de agua que genera un flujo "
+        "constante de entrada y una válvula que permite regularlo. El objetivo "
+        "es controlar el nivel del tanque mediante un lazo de realimentación."
+    )
+    assert is_informative_text(texto)
+
+
+def test_filter_informative_chunks_drops_junk():
+    bueno = Document(
+        page_content=(
+            "El sensor de temperatura se comunica por el bus I2C y entrega "
+            "lecturas cada segundo al microcontrolador principal del sistema."
+        ),
+        metadata={},
+    )
+    malo = Document(page_content="G " * 500, metadata={})
+    result = filter_informative_chunks([bueno, malo])
+    assert result == [bueno]
 
         

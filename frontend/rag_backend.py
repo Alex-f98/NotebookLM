@@ -12,7 +12,11 @@ import httpx
 import networkx as nx
 import streamlit as st
 
-from app.ingester import load_document, split_documents
+from app.ingester import (
+    load_document,
+    split_documents,
+    filter_informative_chunks,
+)
 from app.vector_store import VectorStoreManager
 from app.rag_chain import RAGService
 from app.graph_rag_chain import GraphRAGService
@@ -207,7 +211,7 @@ def ingest_uploads(files, progress_cb=None) -> list[dict]:
                 # Normalizamos el metadata para que no dependa del cwd.
                 doc.metadata["source"] = relative_source
 
-            chunks = split_documents(docs)
+            chunks = filter_informative_chunks(split_documents(docs))
             if not chunks:
                 raise ValueError("El documento no contiene texto extraíble.")
 
@@ -257,6 +261,84 @@ def delete_source(source: str) -> None:
     registry = _load_registry()
     registry.pop(source, None)
     _save_registry(registry)
+
+
+def reindex_sources(progress_cb=None) -> list[dict]:
+    """
+    Reconstruye el índice desde los archivos registrados en `data/sources.json`.
+
+    Es necesario cuando cambia el modelo de embeddings o el tamaño de chunk:
+    los vectores viejos dejan de ser comparables con las consultas nuevas.
+    """
+    registry = _load_registry()
+    store = get_vector_store()
+    store.reset()
+
+    new_registry: dict = {}
+    results: list[dict] = []
+    items = list(registry.items())
+
+    for position, (source, meta) in enumerate(items):
+        name = source_display_name(source)
+        if progress_cb:
+            progress_cb(position, len(items), name)
+
+        path = ROOT / source
+        if not path.exists():
+            results.append(
+                {
+                    "name": name,
+                    "status": "error",
+                    "chunks": 0,
+                    "message": "El archivo ya no existe en data/uploads.",
+                }
+            )
+            continue
+
+        try:
+            docs = load_document(str(path))
+            for doc in docs:
+                doc.metadata["source"] = source
+            chunks = filter_informative_chunks(split_documents(docs))
+            if not chunks:
+                raise ValueError("El documento no contiene texto aprovechable.")
+            ids = store.add_documents(chunks)
+
+            pages = sorted(
+                {
+                    doc.metadata["page"]
+                    for doc in docs
+                    if isinstance(doc.metadata.get("page"), int)
+                }
+            )
+            new_registry[source] = {
+                **meta,
+                "chunks": len(ids),
+                "pages": pages,
+                "indexed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            results.append(
+                {
+                    "name": name,
+                    "status": "indexed",
+                    "chunks": len(ids),
+                    "message": f"{len(ids)} fragmentos reindexados.",
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            results.append(
+                {
+                    "name": name,
+                    "status": "error",
+                    "chunks": 0,
+                    "message": str(exc),
+                }
+            )
+
+    _save_registry(new_registry)
+    if progress_cb:
+        progress_cb(len(items), len(items), "")
+    return results
 
 
 def clear_notebook() -> None:
@@ -363,6 +445,34 @@ def graph_relations(graph, limit: int = 60) -> list[str]:
 def source_page_label(source: dict) -> str:
     page = source.get("page")
     return f"pág. {page + 1}" if isinstance(page, int) else ""
+
+
+def sample_documents(docs: list, max_chunks: int = 16) -> list:
+    """Muestrea fragmentos de forma uniforme a lo largo de todo el documento."""
+    if len(docs) <= max_chunks:
+        return docs
+    step = len(docs) / max_chunks
+    return [docs[min(int(i * step), len(docs) - 1)] for i in range(max_chunks)]
+
+
+def summary_context(docs: list, max_chars: int = 14000,
+                    max_chunks: int = 16) -> str:
+    """
+    Contexto para el resumen global: muestrea todo el documento y reparte el
+    presupuesto de caracteres entre los fragmentos elegidos.
+    """
+    sampled = sample_documents(docs, max_chunks=max_chunks)
+    if not sampled:
+        return ""
+
+    per_chunk = max(200, max_chars // len(sampled))
+    parts = []
+    for doc in sampled:
+        source = source_display_name(doc.metadata.get("source", "")) or "documento"
+        page = doc.metadata.get("page")
+        label = f"{source}, pág. {page + 1}" if isinstance(page, int) else source
+        parts.append(f"[{label}]\n{doc.page_content[:per_chunk]}")
+    return "\n\n".join(parts)[:max_chars]
 
 
 def format_sources(docs: list) -> list[dict]:

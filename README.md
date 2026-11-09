@@ -7,10 +7,53 @@ embeddings y **NetworkX** para el grafo de conocimiento.
 ```
 Ollama (llama3:8b)
       │
-      ├── Ingesta: PDF/TXT → chunks → embeddings → Chroma
+      ├── Ingesta: PDF/TXT → chunks → filtro de calidad → embeddings → Chroma
       ├── RAG vectorial: pregunta → chunks → respuesta con citas
       └── GraphRAG: chunks → tripletas (Entidad→Relación→Entidad) → grafo
 ```
+
+La app usa el modelo multilingüe
+`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2`, pensado para
+preguntas en español sobre documentos en inglés (o viceversa).
+
+---
+
+## Cómo funciona una respuesta
+
+Cuando preguntás algo, el pipeline hace esto:
+
+```
+tu pregunta
+   │
+   ├─ 1. Se convierte en un vector (embedding multilingüe)
+   ├─ 2. Chroma busca los k fragmentos más parecidos de las fuentes tildadas
+   ├─ 3. Se arma un prompt con esos fragmentos + el historial reciente
+   ├─ 4. llama3:8b responde con temperature baja (fiel al contexto)
+   └─ 5. La UI muestra la respuesta + las citas de lo que realmente leyó
+```
+
+El modelo **no ve los PDFs completos**: sólo ve los fragmentos recuperados. Por
+eso, si la respuesta no te convence, abrí **📄 Ver fragmentos consultados**:
+
+- Si el dato **está** en los fragmentos → el problema es el prompt/modelo.
+- Si el dato **no está** → el problema es la recuperación (k, chunking, embeddings).
+
+Para preguntas globales («¿de qué trata?», «resumí») la app agrega el primer
+fragmento de cada fuente, y Studio → Resumen muestrea fragmentos de todo el
+documento.
+
+### Parámetros internos (por si querés ajustarlos)
+
+| Parámetro | Archivo | Valor actual | Efecto |
+| --- | --- | --- | --- |
+| Modelo de embeddings | `app/vector_store.py` | `paraphrase-multilingual-MiniLM-L12-v2` | Calidad de la búsqueda. Cambiarlo exige reindexar. |
+| Métrica | `app/vector_store.py` | coseno | Con embeddings normalizados es la correcta. |
+| `chunk_size` / `overlap` | `app/ingester.py` | 1000 / 150 caracteres | Más grande = más contexto por fragmento. Cambiarlo exige reindexar. |
+| Filtro de basura | `app/ingester.py` | activo | Descarta páginas de gráficos extraídas como `G G G`. |
+| `temperature` | `app/rag_chain.py` | 0.15 | Bajo = respuestas fieles; alto = más creatividad/invención. |
+| `num_predict` | `app/rag_chain.py` | 900 | Largo máximo de la respuesta. |
+| `num_ctx` | `app/rag_chain.py` | 8192 | Tamaño del contexto que acepta el modelo. |
+| Historial | `frontend/streamlit_app.py` | últimos 6 mensajes | Permite repreguntar («¿y por qué?»). |
 
 ---
 
@@ -23,6 +66,9 @@ Ollama (llama3:8b)
 ```bash
 ollama pull llama3:8b
 ```
+
+> La primera vez que corras la app se descarga el modelo de embeddings
+> (~470 MB) desde Hugging Face. Después queda cacheado.
 
 ---
 
@@ -104,6 +150,10 @@ Cada respuesta incluye:
 - El tiempo que tardó la respuesta.
 - Un botón **📝 Guardar en notas**.
 
+Las fórmulas matemáticas se renderizan con **KaTeX**: el modelo las escribe en
+LaTeX (`$...$` en línea, `$$...$$` en bloque) y la app normaliza variantes como
+`\(...\)` o `\[...\]` por si el modelo las usa.
+
 En la pantalla inicial aparecen preguntas sugeridas para arrancar.
 
 #### 4) Studio (panel derecho)
@@ -140,7 +190,11 @@ Dentro de **⚙️ Ajustes de respuesta** en la barra lateral:
 | --- | --- | --- |
 | **Modelo de Ollama** | modelos detectados | Modelo usado para responder y construir el grafo. |
 | **Motor** | `Vectorial` / `GraphRAG` | `Vectorial` usa solo los chunks. `GraphRAG` suma las relaciones del grafo al contexto. |
-| **Fragmentos recuperados (k)** | 1–8 | Cuántos chunks se envían al modelo. |
+| **Fragmentos recuperados (k)** | 1–10 (default 4) | Cuántos chunks se envían al modelo. Más k = más contexto, pero también más ruido. |
+
+Subí `k` para preguntas que cruzan varias secciones; bajalo si las respuestas
+mezclan temas. Si el dato no aparece en las citas, subir `k` no siempre ayuda:
+revisá primero los fragmentos consultados.
 
 Si elegís **GraphRAG** y todavía no hay grafo, la app te avisa y te indica
 construirlo desde Studio → Mapa.
@@ -202,6 +256,26 @@ data/
 > fuentes. Si borrás `data/knowledge_graph.graphml`, se pierde el grafo y hay
 > que reconstruirlo desde Studio → Mapa.
 
+### Reindexar todo
+
+Si cambiás el modelo de embeddings, el tamaño de chunk o el filtro de calidad,
+los vectores viejos dejan de ser comparables con las consultas nuevas. Reindexá
+las fuentes registradas con:
+
+```bash
+# Desde la raíz, con el venv activado
+python -m frontend.reindex
+```
+
+El comando borra la colección de Chroma y vuelve a indexar cada archivo de
+`data/sources.json` con la configuración actual. También podés hacerlo desde la
+UI borrando y volviendo a subir las fuentes, pero el comando es más rápido y no
+pierde el registro.
+
+> Reindexar sólo afecta a los archivos registrados. Un PDF que esté en
+> `data/uploads/` pero no en `data/sources.json` no se indexa: agregalo desde
+> **＋ Agregar fuentes**.
+
 ---
 
 ## Estructura del proyecto
@@ -220,6 +294,8 @@ data/
 ├── frontend/
 │   ├── streamlit_app.py     # Interfaz NotebookLM
 │   ├── rag_backend.py       # Ingesta, estado, grafo y helpers de la UI
+│   ├── math_markdown.py     # Normaliza LaTeX para que KaTeX lo renderice
+│   ├── reindex.py           # CLI para reindexar las fuentes registradas
 │   └── styles.css           # Tema visual tipo NotebookLM
 ├── .streamlit/
 │   └── config.toml          # Tema y configuración del servidor
@@ -256,3 +332,5 @@ pytest -q
 | La construcción del grafo tarda mucho | Bajá «Fragmentos a analizar». Cada fragmento es una llamada al LLM. |
 | Un PDF no devuelve texto | Puede ser un PDF escaneado (sin capa de texto). Probá con otro archivo o aplicá OCR antes. |
 | Un archivo aparece duplicado / no se reindexa | La app deduplica por SHA-256. Si el contenido es idéntico, no lo vuelve a indexar. |
+| Cambié los embeddings o el chunking y las respuestas empeoraron | Reindexá con `python -m frontend.reindex`; los vectores viejos no son comparables con el modelo nuevo. |
+| Las respuestas ignoran una sección del documento | Subí `k`, o dividí el documento en partes más chicas. Revisá **Ver fragmentos consultados** para confirmar que el dato fue recuperado. |
